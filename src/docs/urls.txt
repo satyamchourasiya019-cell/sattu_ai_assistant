@@ -1,0 +1,140 @@
+// ingest.js
+// Reads documents from ./docs and links from ./urls.txt,
+// chunks the text, generates Gemini embeddings, and stores everything in Supabase.
+
+import fs from 'fs';
+import path from 'path';
+import { createClient } from '@supabase/supabase-js';
+import { GoogleGenerativeAI } from '@google/generative-ai';
+import pdfParse from 'pdf-parse';
+import mammoth from 'mammoth';
+import xlsx from 'xlsx';
+import axios from 'axios';
+import * as cheerio from 'cheerio';
+import 'dotenv/config';
+
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_KEY);
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const embedModel = genAI.getGenerativeModel({ model: 'text-embedding-004' });
+
+const DOCS_FOLDER = './docs';   // put your PDF/Word/Excel/txt files here
+const URLS_FILE = './urls.txt'; // one website link per line
+const CHUNK_SIZE = 500;         // words per chunk
+
+function chunkText(text) {
+  const words = text.split(/\s+/).filter(Boolean);
+  const chunks = [];
+  for (let i = 0; i < words.length; i += CHUNK_SIZE) {
+    chunks.push(words.slice(i, i + CHUNK_SIZE).join(' '));
+  }
+  return chunks;
+}
+
+async function extractText(filePath) {
+  const ext = path.extname(filePath).toLowerCase();
+  const buffer = fs.readFileSync(filePath);
+
+  if (ext === '.pdf') {
+    const data = await pdfParse(buffer);
+    return data.text;
+  }
+  if (ext === '.docx') {
+    const result = await mammoth.extractRawText({ buffer });
+    return result.value;
+  }
+  if (ext === '.xlsx' || ext === '.xls') {
+    const workbook = xlsx.read(buffer, { type: 'buffer' });
+    let text = '';
+    workbook.SheetNames.forEach((sheetName) => {
+      const sheet = workbook.Sheets[sheetName];
+      text += xlsx.utils.sheet_to_csv(sheet) + '\n';
+    });
+    return text;
+  }
+  if (ext === '.txt') {
+    return buffer.toString('utf-8');
+  }
+  console.log(`Skipping unsupported file type: ${filePath}`);
+  return '';
+}
+
+async function extractFromUrl(url) {
+  const { data } = await axios.get(url, { timeout: 15000 });
+  const $ = cheerio.load(data);
+  $('script, style, nav, footer').remove();
+  return $('body').text().replace(/\s+/g, ' ').trim();
+}
+
+async function getEmbedding(text) {
+  const result = await embedModel.embedContent(text);
+  return result.embedding.values;
+}
+
+async function storeChunks(chunks, sourceName, sourceType) {
+  for (const chunk of chunks) {
+    if (!chunk.trim()) continue;
+    try {
+      const embedding = await getEmbedding(chunk);
+      const { error } = await supabase.from('documents').insert({
+        content: chunk,
+        embedding,
+        source_name: sourceName,
+        source_type: sourceType,
+      });
+      if (error) {
+        console.error(`  Failed to store chunk from ${sourceName}:`, error.message);
+      } else {
+        console.log(`  Stored chunk from ${sourceName}`);
+      }
+    } catch (err) {
+      console.error(`  Embedding error for ${sourceName}:`, err.message);
+    }
+  }
+}
+
+async function processFiles() {
+  if (!fs.existsSync(DOCS_FOLDER)) {
+    console.log('No ./docs folder found yet, skipping files.');
+    return;
+  }
+  const files = fs.readdirSync(DOCS_FOLDER);
+  for (const file of files) {
+    const filePath = path.join(DOCS_FOLDER, file);
+    const ext = path.extname(file).toLowerCase();
+    console.log(`Processing file: ${file}`);
+    const text = await extractText(filePath);
+    const chunks = chunkText(text);
+    await storeChunks(chunks, file, ext.replace('.', '') || 'unknown');
+  }
+}
+
+async function processUrls() {
+  if (!fs.existsSync(URLS_FILE)) {
+    console.log('No urls.txt found yet, skipping websites.');
+    return;
+  }
+  const urls = fs
+    .readFileSync(URLS_FILE, 'utf-8')
+    .split('\n')
+    .map((u) => u.trim())
+    .filter(Boolean);
+
+  for (const url of urls) {
+    console.log(`Processing URL: ${url}`);
+    try {
+      const text = await extractFromUrl(url);
+      const chunks = chunkText(text);
+      await storeChunks(chunks, url, 'website');
+    } catch (err) {
+      console.error(`  Failed to fetch ${url}:`, err.message);
+    }
+  }
+}
+
+async function main() {
+  await processFiles();
+  await processUrls();
+  console.log('Done! All documents ingested into Supabase.');
+}
+
+main();

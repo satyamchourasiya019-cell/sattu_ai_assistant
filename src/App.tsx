@@ -9,72 +9,80 @@ type Message = {
   text: string;
 };
 
-type VoiceLanguage = "hi-IN" | "en-IN";
+type Conversation = {
+  id: string;
+  title: string;
+  created_at: string;
+};
+
+const ONE_DAY_MS = 24 * 60 * 60 * 1000;
 
 function App() {
-  // ==============================
-  // LOGIN
-  // ==============================
-
   const [isLoggedIn, setIsLoggedIn] = useState(false);
   const [checkingLogin, setCheckingLogin] = useState(true);
 
-  // ==============================
-  // CHAT
-  // ==============================
-
   const [question, setQuestion] = useState("");
+  const [isListening, setIsListening] = useState(false);
+  const [voiceLang, setVoiceLang] =
+    useState<"hi-IN" | "en-IN">("hi-IN");
+
   const [messages, setMessages] = useState<Message[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
 
-  // ==============================
-  // VOICE
-  // ==============================
+  const [conversations, setConversations] =
+    useState<Conversation[]>([]);
 
-  const [isListening, setIsListening] = useState(false);
+  const [currentConversationId, setCurrentConversationId] =
+    useState<string | null>(null);
 
-  // Default language = Hindi
-  const [voiceLang, setVoiceLang] =
-    useState<VoiceLanguage>("hi-IN");
+  const [showHistory, setShowHistory] = useState(false);
 
-  // ==============================
-  // REFS
-  // ==============================
+  const messagesEndRef =
+    useRef<HTMLDivElement>(null);
 
-  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const recognitionRef =
+    useRef<any>(null);
 
-  const recognitionRef = useRef<any>(null);
+  const questionRef =
+    useRef("");
 
-  const questionRef = useRef("");
-
-  // Prevent duplicate submission
-  const voiceSubmittedRef = useRef(false);
-
-  // ==============================
-  // CHECK LOGIN
-  // ==============================
+  /* --------------------------------
+     LOGIN
+  -------------------------------- */
 
   useEffect(() => {
     supabase.auth.getSession().then(({ data }) => {
       setIsLoggedIn(!!data.session);
       setCheckingLogin(false);
+
+      if (data.session) {
+        loadHistory();
+      }
     });
 
     const {
       data: listener,
-    } = supabase.auth.onAuthStateChange((_event, session) => {
-      setIsLoggedIn(!!session);
-    });
+    } = supabase.auth.onAuthStateChange(
+      (_event, session) => {
+        setIsLoggedIn(!!session);
 
-    return () => {
+        if (session) {
+          loadHistory();
+        } else {
+          setMessages([]);
+          setConversations([]);
+        }
+      }
+    );
+
+    return () =>
       listener.subscription.unsubscribe();
-    };
   }, []);
 
-  // ==============================
-  // AUTO SCROLL
-  // ==============================
+  /* --------------------------------
+     AUTO SCROLL
+  -------------------------------- */
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({
@@ -82,125 +90,390 @@ function App() {
     });
   }, [messages]);
 
-  // ==============================
-  // CLEANUP VOICE
-  // ==============================
-
-  useEffect(() => {
-    return () => {
-      try {
-        recognitionRef.current?.abort();
-      } catch {
-        // Ignore cleanup error
-      }
-
-      try {
-        window.speechSynthesis?.cancel();
-      } catch {
-        // Ignore cleanup error
-      }
-    };
-  }, []);
-
-  // ==============================
-  // TEXT TO SPEECH
-  // ==============================
+  /* --------------------------------
+     SPEECH
+  -------------------------------- */
 
   const speak = (text: string) => {
-    if (!text.trim()) return;
-
     if (!("speechSynthesis" in window)) {
-      console.warn("Speech synthesis not supported.");
       return;
     }
 
-    // Stop previous speech
     window.speechSynthesis.cancel();
 
-    const utterance = new SpeechSynthesisUtterance(text);
+    const isHindi =
+      /[\u0900-\u097F]/.test(text);
 
-    // Detect Hindi characters
-    const hasHindi = /[\u0900-\u097F]/.test(text);
+    const utterance =
+      new SpeechSynthesisUtterance(text);
 
-    if (hasHindi) {
-      utterance.lang = "hi-IN";
-    } else {
-      utterance.lang = "en-IN";
-    }
+    utterance.lang =
+      isHindi ? "hi-IN" : "en-IN";
 
     utterance.rate = 1;
     utterance.pitch = 1;
-    utterance.volume = 1;
 
-    utterance.onerror = (event) => {
-      console.error("Speech synthesis error:", event);
-    };
-
-    window.speechSynthesis.speak(utterance);
+    window.speechSynthesis.speak(
+      utterance
+    );
   };
 
-  // ==============================
-  // ASK AI
-  // ==============================
+  /* --------------------------------
+     LOAD 1-DAY HISTORY
+  -------------------------------- */
 
-  const handleAsk = async (overrideText?: string) => {
-    const textToSend = (
-      overrideText !== undefined
-        ? overrideText
-        : question
-    ).trim();
+  const loadHistory = async () => {
+    try {
+      const {
+        data: userData,
+      } = await supabase.auth.getUser();
 
-    if (!textToSend) return;
+      const user = userData.user;
 
-    // Stop any active voice recognition
-    if (isListening) {
-      try {
-        recognitionRef.current?.abort();
-      } catch {
-        // Ignore
+      if (!user) return;
+
+      const cutoff = new Date(
+        Date.now() - ONE_DAY_MS
+      ).toISOString();
+
+      // Remove older than 24 hours
+      await supabase
+        .from("chat_history")
+        .delete()
+        .eq("user_id", user.id)
+        .lt("created_at", cutoff);
+
+      const {
+        data,
+        error: historyError,
+      } = await supabase
+        .from("chat_history")
+        .select(
+          "id, conversation_id, role, text, created_at"
+        )
+        .eq("user_id", user.id)
+        .gte("created_at", cutoff)
+        .order("created_at", {
+          ascending: true,
+        });
+
+      if (historyError) {
+        console.error(
+          "History load error:",
+          historyError
+        );
+        return;
       }
 
-      setIsListening(false);
-    }
+      if (!data) {
+        setConversations([]);
+        return;
+      }
 
-    // Clear error
+      /* Group messages into conversations */
+
+      const grouped =
+        new Map<string, any[]>();
+
+      for (const row of data) {
+        if (
+          !grouped.has(
+            row.conversation_id
+          )
+        ) {
+          grouped.set(
+            row.conversation_id,
+            []
+          );
+        }
+
+        grouped
+          .get(row.conversation_id)!
+          .push(row);
+      }
+
+      const conversationList:
+        Conversation[] = [];
+
+      grouped.forEach(
+        (rows, conversationId) => {
+          const firstUserMessage =
+            rows.find(
+              (row) =>
+                row.role === "user"
+            );
+
+          conversationList.push({
+            id: conversationId,
+            title:
+              firstUserMessage?.text
+                ?.slice(0, 40) ||
+              "New conversation",
+            created_at:
+              rows[0].created_at,
+          });
+        }
+      );
+
+      conversationList.sort(
+        (a, b) =>
+          new Date(
+            b.created_at
+          ).getTime() -
+          new Date(
+            a.created_at
+          ).getTime()
+      );
+
+      setConversations(
+        conversationList
+      );
+    } catch (err) {
+      console.error(
+        "History error:",
+        err
+      );
+    }
+  };
+
+  /* --------------------------------
+     SAVE MESSAGE
+  -------------------------------- */
+
+  const saveMessage = async (
+    conversationId: string,
+    role: "user" | "ai",
+    text: string
+  ) => {
+    try {
+      const {
+        data: userData,
+      } = await supabase.auth.getUser();
+
+      const user = userData.user;
+
+      if (!user) return;
+
+      const {
+        error: insertError,
+      } = await supabase
+        .from("chat_history")
+        .insert({
+          user_id: user.id,
+          conversation_id:
+            conversationId,
+          role,
+          text,
+        });
+
+      if (insertError) {
+        console.error(
+          "Save history error:",
+          insertError
+        );
+      }
+    } catch (err) {
+      console.error(
+        "History save error:",
+        err
+      );
+    }
+  };
+
+  /* --------------------------------
+     LOAD SELECTED CONVERSATION
+  -------------------------------- */
+
+  const openConversation = async (
+    conversationId: string
+  ) => {
+    try {
+      const {
+        data: userData,
+      } = await supabase.auth.getUser();
+
+      const user = userData.user;
+
+      if (!user) return;
+
+      const cutoff = new Date(
+        Date.now() - ONE_DAY_MS
+      ).toISOString();
+
+      const {
+        data,
+        error: loadError,
+      } = await supabase
+        .from("chat_history")
+        .select("role, text, created_at")
+        .eq("user_id", user.id)
+        .eq(
+          "conversation_id",
+          conversationId
+        )
+        .gte("created_at", cutoff)
+        .order("created_at", {
+          ascending: true,
+        });
+
+      if (loadError) {
+        console.error(
+          "Conversation load error:",
+          loadError
+        );
+        return;
+      }
+
+      const loadedMessages: Message[] =
+        (data || []).map((row) => ({
+          role: row.role as
+            | "user"
+            | "ai",
+          text: row.text,
+        }));
+
+      setMessages(loadedMessages);
+
+      setCurrentConversationId(
+        conversationId
+      );
+
+      setShowHistory(false);
+      setError("");
+    } catch (err) {
+      console.error(
+        "Open conversation error:",
+        err
+      );
+    }
+  };
+
+  /* --------------------------------
+     NEW CHAT
+  -------------------------------- */
+
+  const newChat = () => {
+    window.speechSynthesis?.cancel();
+
+    setMessages([]);
+    setQuestion("");
+    setError("");
+    setCurrentConversationId(null);
+    setShowHistory(false);
+  };
+
+  /* --------------------------------
+     DELETE CONVERSATION
+  -------------------------------- */
+
+  const deleteConversation = async (
+    conversationId: string
+  ) => {
+    try {
+      const {
+        data: userData,
+      } = await supabase.auth.getUser();
+
+      const user = userData.user;
+
+      if (!user) return;
+
+      const {
+        error: deleteError,
+      } = await supabase
+        .from("chat_history")
+        .delete()
+        .eq("user_id", user.id)
+        .eq(
+          "conversation_id",
+          conversationId
+        );
+
+      if (deleteError) {
+        console.error(
+          "Delete history error:",
+          deleteError
+        );
+        return;
+      }
+
+      setConversations((prev) =>
+        prev.filter(
+          (item) =>
+            item.id !==
+            conversationId
+        )
+      );
+
+      if (
+        currentConversationId ===
+        conversationId
+      ) {
+        newChat();
+      }
+    } catch (err) {
+      console.error(
+        "Delete conversation error:",
+        err
+      );
+    }
+  };
+
+  /* --------------------------------
+     ASK AI
+  -------------------------------- */
+
+  const handleAsk = async (
+    overrideText?: string
+  ) => {
+    const textToSend =
+      overrideText ?? question;
+
+    if (!textToSend.trim()) return;
+
     setError("");
 
-    // Add user message
+    let conversationId =
+      currentConversationId;
+
+    if (!conversationId) {
+      conversationId =
+        crypto.randomUUID();
+
+      setCurrentConversationId(
+        conversationId
+      );
+    }
+
+    const cleanText =
+      textToSend.trim();
+
     setMessages((prev) => [
       ...prev,
       {
         role: "user",
-        text: textToSend,
+        text: cleanText,
       },
     ]);
 
-    // Clear input
     setQuestion("");
-
-    // Clear voice ref
-    questionRef.current = "";
-
     setIsLoading(true);
 
+    // Save user message
+    await saveMessage(
+      conversationId,
+      "user",
+      cleanText
+    );
+
     try {
-      console.log("Sending question to AI:", textToSend);
-
-      const result = await askAi(textToSend);
-
-      console.log("AI response:", result);
+      const result =
+        await askAi(cleanText);
 
       const aiAnswer =
         result?.answer ||
-        result?.response ||
-        result?.message ||
-        JSON.stringify(result);
+        "Mujhe iska answer nahi mil paya.";
 
-      if (!aiAnswer) {
-        throw new Error("AI returned an empty response.");
-      }
-
-      // Add AI message
       setMessages((prev) => [
         ...prev,
         {
@@ -209,183 +482,116 @@ function App() {
         },
       ]);
 
-      // Speak AI answer
+      // Save AI message
+      await saveMessage(
+        conversationId,
+        "ai",
+        aiAnswer
+      );
+
       speak(aiAnswer);
+
+      // Refresh sidebar
+      await loadHistory();
     } catch (err) {
-  console.error("ASK AI ERROR:", err);
+      console.error(
+        "AI error:",
+        err
+      );
 
-  const message =
-    err instanceof Error
-      ? err.message
-      : String(err);
+      const message =
+        err instanceof Error
+          ? err.message
+          : "";
 
-  setError(`AI Error: ${message}`);
-} finally {
+      if (
+        message.includes("429")
+      ) {
+        setError(
+          "AI ki free limit temporarily reach ho gayi hai. Thodi der baad dobara try karo."
+        );
+      } else {
+        setError(
+          "AI se response lene mein problem hui. Dobara try karo."
+        );
+      }
+    } finally {
       setIsLoading(false);
     }
   };
 
-  // ==============================
-  // VOICE INPUT
-  // ==============================
+  /* --------------------------------
+     VOICE
+  -------------------------------- */
 
   const handleVoice = () => {
     const SpeechRecognition =
-      (window as any).SpeechRecognition ||
-      (window as any).webkitSpeechRecognition;
+      (window as any)
+        .SpeechRecognition ||
+      (window as any)
+        .webkitSpeechRecognition;
 
-    // Browser support check
     if (!SpeechRecognition) {
       setError(
-        "Ye browser voice input support nahi karta. Chrome use karo."
+        "Ye browser voice input support nahi karta."
       );
-
       return;
     }
-
-    // ==============================
-    // STOP LISTENING
-    // ==============================
 
     if (isListening) {
-      try {
-        recognitionRef.current?.stop();
-      } catch (err) {
-        console.error("Stop recognition error:", err);
-      }
-
+      recognitionRef.current?.stop();
       return;
     }
 
-    // ==============================
-    // STOP PREVIOUS INSTANCE
-    // ==============================
+    const recognition =
+      new SpeechRecognition();
 
-    if (recognitionRef.current) {
-      try {
-        recognitionRef.current.abort();
-      } catch {
-        // Ignore
-      }
-
-      recognitionRef.current = null;
-    }
-
-    // ==============================
-    // RESET
-    // ==============================
-
-    setError("");
+    recognition.lang = voiceLang;
+    recognition.continuous = false;
+    recognition.interimResults = true;
 
     questionRef.current = "";
 
-    voiceSubmittedRef.current = false;
-
-    setQuestion("");
-
-    // ==============================
-    // CREATE RECOGNITION
-    // ==============================
-
-    const recognition = new SpeechRecognition();
-
-    // HI / EN language
-    recognition.lang = voiceLang;
-
-    // One question at a time
-    recognition.continuous = false;
-
-    // Only final result
-    recognition.interimResults = false;
-
-    recognition.maxAlternatives = 1;
-
-    // ==============================
-    // START
-    // ==============================
-
     recognition.onstart = () => {
-      console.log(
-        "Voice recognition started:",
-        voiceLang
-      );
-
-      questionRef.current = "";
-
-      voiceSubmittedRef.current = false;
-
-      setIsListening(true);
-
       setError("");
+      setIsListening(true);
     };
 
-    // ==============================
-    // RESULT
-    // ==============================
+    recognition.onresult = (
+      event: any
+    ) => {
+      let transcript = "";
 
-    recognition.onresult = (event: any) => {
-      try {
-        const transcript =
-          event.results?.[0]?.[0]?.transcript?.trim() || "";
-
-        console.log(
-          "Voice transcript:",
-          transcript
-        );
-
-        if (!transcript) {
-          return;
-        }
-
-        questionRef.current = transcript;
-
-        setQuestion(transcript);
-      } catch (err) {
-        console.error(
-          "Transcript processing error:",
-          err
-        );
+      for (
+        let i = 0;
+        i < event.results.length;
+        i++
+      ) {
+        transcript +=
+          event.results[i][0]
+            .transcript;
       }
-    };
 
-    // ==============================
-    // END
-    // ==============================
+      questionRef.current =
+        transcript;
+
+      setQuestion(transcript);
+    };
 
     recognition.onend = () => {
-      console.log("Voice recognition ended.");
-
       setIsListening(false);
 
       const finalText =
         questionRef.current.trim();
 
-      console.log(
-        "Final voice text:",
-        finalText
-      );
-
-      // No speech
-      if (!finalText) {
-        return;
+      if (finalText) {
+        handleAsk(finalText);
       }
-
-      // Prevent duplicate submit
-      if (voiceSubmittedRef.current) {
-        return;
-      }
-
-      voiceSubmittedRef.current = true;
-
-      // Automatically ask AI
-      handleAsk(finalText);
     };
 
-    // ==============================
-    // ERROR
-    // ==============================
-
-    recognition.onerror = (event: any) => {
+    recognition.onerror = (
+      event: any
+    ) => {
       console.error(
         "Speech recognition error:",
         event
@@ -393,73 +599,18 @@ function App() {
 
       setIsListening(false);
 
-      const errorType = event?.error;
-
-      // User manually stopped recognition
-      if (errorType === "aborted") {
-        return;
-      }
-
-      // Permission denied
-      if (errorType === "not-allowed") {
+      if (
+        event.error !==
+        "aborted"
+      ) {
         setError(
-          "Microphone permission allow karo, phir dobara mic dabao."
+          "Voice sunne mein problem hui. Dobara try karo."
         );
-
-        return;
       }
-
-      // Microphone unavailable
-      if (errorType === "audio-capture") {
-        setError(
-          "Microphone nahi mil raha. Mic connected/check karo."
-        );
-
-        return;
-      }
-
-      // Nothing spoken
-      if (errorType === "no-speech") {
-        setError(
-          "Kuch suna nahi. Mic dabao aur clearly bolo."
-        );
-
-        return;
-      }
-
-      // Network problem
-      if (errorType === "network") {
-        setError(
-          "Voice recognition ke liye network problem aa rahi hai."
-        );
-
-        return;
-      }
-
-      // Service unavailable
-      if (errorType === "service-not-allowed") {
-        setError(
-          "Voice recognition service available nahi hai."
-        );
-
-        return;
-      }
-
-      // Generic
-      setError(
-        `Voice error: ${errorType || "unknown"}`
-      );
     };
 
-    // ==============================
-    // SAVE INSTANCE
-    // ==============================
-
-    recognitionRef.current = recognition;
-
-    // ==============================
-    // START RECOGNITION
-    // ==============================
+    recognitionRef.current =
+      recognition;
 
     try {
       recognition.start();
@@ -468,65 +619,26 @@ function App() {
         "Recognition start error:",
         err
       );
-
-      setIsListening(false);
-
-      setError(
-        "Microphone start nahi ho paya. Dobara try karo."
-      );
     }
   };
 
-  // ==============================
-  // LANGUAGE TOGGLE
-  // ==============================
-
-  const toggleVoiceLanguage = () => {
-    // Don't change language while listening
-    if (isListening) {
-      setError(
-        "Language change karne se pehle mic stop karo."
-      );
-
-      return;
-    }
-
-    setVoiceLang((current) =>
-      current === "hi-IN"
-        ? "en-IN"
-        : "hi-IN"
-    );
-
-    setError("");
-  };
-
-  // ==============================
-  // LOGOUT
-  // ==============================
+  /* --------------------------------
+     LOGOUT
+  -------------------------------- */
 
   const handleLogout = async () => {
-    // Stop recognition
-    try {
-      recognitionRef.current?.abort();
-    } catch {
-      // Ignore
-    }
-
-    // Stop speech
-    try {
-      window.speechSynthesis?.cancel();
-    } catch {
-      // Ignore
-    }
-
-    setIsListening(false);
+    window.speechSynthesis?.cancel();
 
     await supabase.auth.signOut();
+
+    setMessages([]);
+    setConversations([]);
+    setCurrentConversationId(null);
   };
 
-  // ==============================
-  // LOGIN CHECK
-  // ==============================
+  /* --------------------------------
+     LOADING
+  -------------------------------- */
 
   if (checkingLogin) {
     return <p>Loading...</p>;
@@ -536,31 +648,114 @@ function App() {
     return <Login />;
   }
 
-  // ==============================
-  // UI
-  // ==============================
+  /* --------------------------------
+     UI
+  -------------------------------- */
 
   return (
     <main className="app">
 
-      {/* ==========================
-          HEADER
-      ========================== */}
+      {/* SIDEBAR */}
+
+      {showHistory && (
+        <aside className="history-sidebar">
+
+          <div className="history-header">
+            <h3>Chat History</h3>
+
+            <button
+              onClick={() =>
+                setShowHistory(false)
+              }
+            >
+              ✕
+            </button>
+          </div>
+
+          <button
+            className="new-chat-button"
+            onClick={newChat}
+          >
+            + New Chat
+          </button>
+
+          <div className="history-list">
+
+            {conversations.length ===
+              0 && (
+              <p className="helper-text">
+                Last 24 hours mein
+                koi chat nahi hai.
+              </p>
+            )}
+
+            {conversations.map(
+              (conversation) => (
+                <div
+                  key={
+                    conversation.id
+                  }
+                  className={`history-item ${
+                    currentConversationId ===
+                    conversation.id
+                      ? "active"
+                      : ""
+                  }`}
+                >
+                  <button
+                    className="history-item-main"
+                    onClick={() =>
+                      openConversation(
+                        conversation.id
+                      )
+                    }
+                  >
+                    {conversation.title}
+                  </button>
+
+                  <button
+                    className="history-delete"
+                    onClick={() =>
+                      deleteConversation(
+                        conversation.id
+                      )
+                    }
+                    aria-label="Delete chat"
+                  >
+                    🗑
+                  </button>
+                </div>
+              )
+            )}
+          </div>
+
+        </aside>
+      )}
+
+      {/* HEADER */}
 
       <header className="top-header">
 
         <button
           className="icon-button"
-          aria-label="Open menu"
+          aria-label="Chat history"
+          onClick={() =>
+            setShowHistory(
+              !showHistory
+            )
+          }
         >
-          <span className="menu-line"></span>
-          <span className="menu-line"></span>
-          <span className="menu-line"></span>
+          ☰
         </button>
 
         <div className="header-title">
-          <h1>SATTU AI ASSISTANT</h1>
-          <p>Your Company Knowledge Assistant</p>
+          <h1>
+            SATTU AI ASSISTANT
+          </h1>
+          <p>
+            Your Company Knowledge
+            Assistant
+          </p>
         </div>
 
         <button
@@ -571,143 +766,134 @@ function App() {
           Logout
         </button>
 
-        <button
-          className="history-button"
-          aria-label="Chat history"
-        >
-          <span className="history-icon">
-            ↶
-          </span>
-        </button>
-
       </header>
 
-      {/* ==========================
-          ASSISTANT AREA
-      ========================== */}
+      {/* ASSISTANT */}
 
       <section className="assistant-content">
 
-        <div className="robot-area">
+        {messages.length === 0 ? (
+          <div className="robot-area">
 
-          <div className="robot-glow">
+            <div className="robot-glow">
+              <div className="robot">
+                <div className="robot-antenna"></div>
 
-            <div className="robot">
-
-              <div className="robot-antenna"></div>
-
-              <div className="robot-head">
-
-                <div className="robot-screen">
-
-                  <span className="robot-eye"></span>
-
-                  <span className="robot-eye"></span>
-
-                  <span className="robot-smile"></span>
-
+                <div className="robot-head">
+                  <div className="robot-screen">
+                    <span className="robot-eye"></span>
+                    <span className="robot-eye"></span>
+                    <span className="robot-smile"></span>
+                  </div>
                 </div>
 
+                <div className="robot-ear robot-ear-left"></div>
+                <div className="robot-ear robot-ear-right"></div>
+
+                <div className="robot-body"></div>
               </div>
-
-              <div className="robot-ear robot-ear-left"></div>
-
-              <div className="robot-ear robot-ear-right"></div>
-
-              <div className="robot-body"></div>
-
             </div>
 
+            <h2>Hello!</h2>
+
+            <p>
+              How can I help you
+              today?
+            </p>
+
           </div>
+        ) : (
+          <div className="chat-messages">
 
-          <h2>Hello!</h2>
+            {messages.map(
+              (msg, index) => (
+                <p
+                  key={index}
+                  className={
+                    msg.role === "user"
+                      ? "user-text"
+                      : "answer-text"
+                  }
+                >
+                  {msg.text}
+                </p>
+              )
+            )}
 
-          <p>
-            How can I help you today?
-          </p>
+            {isLoading && (
+              <p className="helper-text">
+                Soch raha hoon...
+              </p>
+            )}
 
-        </div>
+            {error && (
+              <p
+                className="helper-text"
+                style={{
+                  color: "red",
+                }}
+              >
+                {error}
+              </p>
+            )}
+
+            <div
+              ref={messagesEndRef}
+            />
+
+          </div>
+        )}
 
       </section>
 
-      {/* ==========================
-          CHAT / ASK AREA
-      ========================== */}
+      {/* ASK AREA */}
 
       <section className="ask-container">
 
-        {/* ========================
-            MESSAGES
-        ======================== */}
-
-        <div className="chat-messages">
-
-          {messages.map((msg, index) => (
-            <p
-              key={index}
-              className={
-                msg.role === "user"
-                  ? "user-text"
-                  : "answer-text"
-              }
-            >
-              {msg.text}
-            </p>
-          ))}
-
-          {isLoading && (
-            <p className="helper-text">
-              Soch raha hoon...
-            </p>
-          )}
-
-          {error && (
-            <p
-              className="helper-text"
-              style={{ color: "red" }}
-            >
-              {error}
-            </p>
-          )}
-
-          <div ref={messagesEndRef} />
-
-        </div>
-
-        {/* ========================
-            QUESTION BOX
-        ======================== */}
+        {messages.length > 0 && (
+          <div className="chat-messages">
+            {isLoading && (
+              <p className="helper-text">
+                {voiceLang === "hi-IN"
+                  ? "Soch raha hoon..."
+                  : "Thinking..."}
+              </p>
+            )}
+          </div>
+        )}
 
         <div className="question-box">
 
           <textarea
             value={question}
             onChange={(event) =>
-              setQuestion(event.target.value)
+              setQuestion(
+                event.target.value
+              )
             }
-            placeholder={
-              isListening
-                ? voiceLang === "hi-IN"
-                  ? "Bolna shuru karo..."
-                  : "Start speaking..."
-                : "Ask anything..."
-            }
+            onKeyDown={(event) => {
+              if (
+                event.key ===
+                  "Enter" &&
+                !event.shiftKey
+              ) {
+                event.preventDefault();
+                handleAsk();
+              }
+            }}
+            placeholder="Ask anything..."
             rows={1}
           />
 
-          {/* ======================
-              LANGUAGE BUTTON
-          ====================== */}
-
           <button
             className="lang-toggle"
-            onClick={toggleVoiceLanguage}
-            disabled={isListening}
-            aria-label="Change voice language"
-            title={
-              voiceLang === "hi-IN"
-                ? "Voice language: Hindi"
-                : "Voice language: English"
+            onClick={() =>
+              setVoiceLang(
+                voiceLang ===
+                  "hi-IN"
+                  ? "en-IN"
+                  : "hi-IN"
+              )
             }
           >
             {voiceLang === "hi-IN"
@@ -715,75 +901,48 @@ function App() {
               : "EN"}
           </button>
 
-          {/* ======================
-              MICROPHONE BUTTON
-          ====================== */}
-
           <button
             className={`voice-button ${
               isListening
                 ? "listening"
                 : ""
             }`}
-            onClick={handleVoice}
-            aria-label={
-              isListening
-                ? "Stop listening"
-                : "Speak your question"
+            onClick={
+              handleVoice
             }
-            title={
-              isListening
-                ? "Stop listening"
-                : voiceLang === "hi-IN"
-                ? "Speak in Hindi"
-                : "Speak in English"
-            }
+            aria-label="Speak your question"
           >
             <span className="mic-icon">
-              {isListening ? "■" : "●"}
+              ●
             </span>
           </button>
 
         </div>
 
-        {/* ========================
-            ASK BUTTON
-        ======================== */}
-
         <button
           className="ask-button"
-          onClick={() => handleAsk()}
-          disabled={isLoading}
+          onClick={() =>
+            handleAsk()
+          }
+          disabled={
+            isLoading ||
+            !question.trim()
+          }
         >
           <span className="sparkle">
             ✦
           </span>
 
-          <span>
-            {isLoading
-              ? "Thinking..."
-              : "Ask"}
-          </span>
+          <span>Ask</span>
 
           <span className="arrow">
             →
           </span>
         </button>
 
-        {/* ========================
-            HELPER
-        ======================== */}
-
         <p className="helper-text">
-          {isListening
-            ? voiceLang === "hi-IN"
-              ? "Hindi mein bolo..."
-              : "Speak in English..."
-            : `Voice: ${
-                voiceLang === "hi-IN"
-                  ? "Hindi"
-                  : "English"
-              } • You can type or speak your question`}
+          You can type or speak your
+          question
         </p>
 
       </section>

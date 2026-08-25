@@ -594,3 +594,75 @@
   margin-right: 6px;
   cursor: pointer;
 }
+.history-sidebar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 300px;
+  height: 100vh;
+  z-index: 1000;
+  padding: 20px;
+  background: #ffffff;
+  box-shadow: 4px 0 20px rgba(0, 0, 0, 0.15);
+  overflow-y: auto;
+}
+
+.history-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 15px;
+}
+
+.history-header h3 {
+  margin: 0;
+}
+
+.history-header button {
+  border: none;
+  background: transparent;
+  font-size: 20px;
+  cursor: pointer;
+}
+
+.new-chat-button {
+  width: 100%;
+  padding: 12px;
+  margin-bottom: 15px;
+  border: none;
+  border-radius: 10px;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.history-item {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 8px;
+}
+
+.history-item-main {
+  flex: 1;
+  padding: 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  text-align: left;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.history-item-main:hover,
+.history-item.active .history-item-main {
+  background: rgba(0, 0, 0, 0.08);
+}
+
+.history-delete {
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  padding: 8px;
+}
